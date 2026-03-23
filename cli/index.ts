@@ -597,15 +597,6 @@ program
     const { DashboardServer } = await import("../src/services/dashboardServer.js");
     const server = new DashboardServer({ port, autoOpen: opts.open !== false });
 
-    if (!DashboardServer.isBuilt()) {
-      fail(
-        "Dashboard build not found.\n" +
-        "  Run: pnpm --filter @workspace/kassar-dashboard build\n" +
-        "  Then copy dist/ to dashboard-dist/ in the project root."
-      );
-      process.exit(1);
-    }
-
     try {
       await server.start();
       ok(`Dashboard running at http://127.0.0.1:${port}`);
