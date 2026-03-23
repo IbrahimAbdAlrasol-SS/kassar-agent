@@ -231,21 +231,31 @@ if (-not (Test-Path $CONFIG_FILE)) {
 # --- Install Windows Service --------------------------------------------------
 Write-Header "Installing Windows Service"
 
-$svcBinPath = "`"$CMD_FILE`""
-
+# Remove any stale/broken existing service first
 $existing = sc.exe query $SERVICE_NAME 2>&1
 if ($existing -notlike "*FAILED*") {
-    Write-Warn "Service '$SERVICE_NAME' already exists -- skipping"
-    Write-Step "Run:  sc start $SERVICE_NAME  to start it"
-} else {
-    $svcArgs = "binPath= `"$CMD_FILE start --foreground`" DisplayName= `"Kassar Agent`" start= auto"
-    sc.exe create $SERVICE_NAME binPath= "$CMD_FILE start --foreground" DisplayName= "Kassar Agent" start= auto 2>&1 | Out-Null
+    Write-Step "Removing old service registration..."
+    sc.exe stop $SERVICE_NAME 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    sc.exe delete $SERVICE_NAME 2>&1 | Out-Null
+    Start-Sleep -Seconds 1
+    Write-Step "Old service removed"
+}
+
+# Use CLI to install (builds correct node.exe + tsx binPath)
+Write-Step "Registering Windows Service via kassar CLI..."
+cmd /c "`"$CMD_FILE`" service install"
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "Service '$SERVICE_NAME' installed (auto-start on boot)"
+    Write-Step "Starting service..."
+    cmd /c "`"$CMD_FILE`" service start"
     if ($LASTEXITCODE -eq 0) {
-        sc.exe description $SERVICE_NAME "Autonomous AI agent with Telegram + OpenAI" | Out-Null
-        Write-Ok "Service '$SERVICE_NAME' registered (auto-start on boot)"
+        Write-Ok "Service '$SERVICE_NAME' started"
     } else {
-        Write-Warn "Service registration failed -- run later: kassar service install"
+        Write-Warn "Service installed but could not auto-start -- run: kassar service start"
     }
+} else {
+    Write-Warn "Service install failed -- run manually: kassar service install"
 }
 
 # --- Verify kassar command ----------------------------------------------------
