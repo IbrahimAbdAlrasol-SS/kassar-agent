@@ -149,7 +149,7 @@ Write-Header "Installing dependencies"
 
 Set-Location $SRC_DIR
 Write-Step "Running npm install (this may take a minute)..."
-& npm install
+cmd /c "npm install"
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "npm install failed (exit code: $LASTEXITCODE)"
     exit 1
@@ -172,7 +172,7 @@ if (Test-Path $tsxPath) {
     # Build first, then use compiled output
     Write-Step "Building TypeScript..."
     Set-Location $SRC_DIR
-    & npm run build
+    cmd /c "npm run build"
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "TypeScript build failed"
         exit 1
