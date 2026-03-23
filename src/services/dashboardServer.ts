@@ -1,17 +1,23 @@
 /**
  * dashboardServer.ts
  *
- * Serves the kassar-dashboard at http://127.0.0.1:22022  (LOCAL ONLY).
- *
- * Priority:
- *   1. If dashboard-dist/index.html exists → serve pre-built React app
- *   2. Otherwise                           → serve built-in status page
- *
- * Binds only to 127.0.0.1 — never reachable from the network.
+ * Serves the kassar-dashboard at http://127.0.0.1:22022 (LOCAL ONLY).
+ * Provides real API endpoints that read/write local config, logs, memory files.
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from "http";
-import { createReadStream, existsSync, readFileSync, statSync } from "fs";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "http";
+import {
+  createReadStream,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  statSync,
+} from "fs";
 import { resolve, extname, dirname, join } from "path";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
@@ -43,98 +49,228 @@ export interface DashboardServerOptions {
   autoOpen?: boolean;
 }
 
-// ─── Fallback embedded page ───────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getConfig() {
+function readJson(path: string): unknown {
   try {
-    const p = resolve(PROJECT_ROOT, "config.json");
-    if (existsSync(p)) return JSON.parse(readFileSync(p, "utf-8"));
-  } catch { /* ignore */ }
-  return { agent: { name: "kassar-agent", version: "1.0.0" }, telegram: { botToken: "" } };
+    if (!existsSync(path)) return null;
+    return JSON.parse(readFileSync(path, "utf-8"));
+  } catch { return null; }
 }
 
-function buildFallbackHTML(port: number): string {
-  const cfg        = getConfig();
-  const agentName  = cfg?.agent?.name    ?? "kassar-agent";
-  const version    = cfg?.agent?.version ?? "1.0.0";
-  const hasTelegram = !!(cfg?.telegram?.botToken);
-  const now        = new Date().toLocaleString("ar-SA");
+function readText(path: string): string | null {
+  try {
+    if (!existsSync(path)) return null;
+    return readFileSync(path, "utf-8");
+  } catch { return null; }
+}
 
-  return `<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Kassar Agent — لوحة التحكم</title>
-<style>
-  :root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--accent:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--text:#c9d1d9;--muted:#8b949e}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;padding:24px}
-  .header{display:flex;align-items:center;gap:16px;border-bottom:1px solid var(--border);padding-bottom:20px;margin-bottom:24px}
-  .logo{font-size:28px;font-weight:700;color:var(--accent)}
-  .badge{background:var(--surface);border:1px solid var(--border);color:var(--muted);padding:2px 10px;border-radius:20px;font-size:12px}
-  .local-badge{background:#1a2d1a;border:1px solid #2ea043;color:var(--green);padding:2px 10px;border-radius:20px;font-size:12px;margin-right:auto}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-bottom:24px}
-  .card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px}
-  .card h3{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
-  .status-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-  .dot{width:10px;height:10px;border-radius:50%}
-  .dot.green{background:var(--green);box-shadow:0 0 8px var(--green)}
-  .dot.yellow{background:var(--yellow);box-shadow:0 0 8px var(--yellow)}
-  .dot.red{background:var(--red);box-shadow:0 0 8px var(--red)}
-  .cmd{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:8px;font-family:Consolas,monospace;font-size:13px;color:#79c0ff;display:flex;align-items:center;justify-content:space-between;gap:8px}
-  .btn{background:var(--surface);border:1px solid var(--border);color:var(--muted);padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer;white-space:nowrap}
-  .btn:hover{border-color:var(--accent);color:var(--accent)}
-  .info-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px}
-  .info-row:last-child{border-bottom:none}
-  .muted{color:var(--muted)}
-  .notice{background:#111d11;border:1px solid #2ea043;border-radius:8px;padding:12px 16px;margin-bottom:24px;font-size:13px;color:var(--green)}
-  footer{margin-top:32px;text-align:center;color:var(--muted);font-size:12px;border-top:1px solid var(--border);padding-top:20px}
-  a{color:var(--accent)}
-</style>
-</head>
-<body>
-<div class="header">
-  <div class="logo">kassar</div>
-  <span class="badge">v${version}</span>
-  <span class="local-badge">&#128274; محلي فقط</span>
-</div>
-<div class="notice">&#9989; هذه اللوحة تعمل على جهازك فقط (127.0.0.1:${port}) — لا أحد يصل إليها من الإنترنت</div>
-<div class="grid">
-  <div class="card">
-    <h3>حالة الوكيل</h3>
-    <div class="status-row"><div class="dot ${hasTelegram ? 'green' : 'yellow'}"></div><span>${hasTelegram ? 'جاهز' : 'يحتاج إعداد Telegram'}</span></div>
-    <div style="font-size:20px;font-weight:700">${agentName}</div>
-  </div>
-  <div class="card">
-    <h3>Telegram</h3>
-    <div class="status-row"><div class="dot ${hasTelegram ? 'green' : 'red'}"></div><span style="color:${hasTelegram ? 'var(--green)' : 'var(--red)'}">${hasTelegram ? 'مُفعَّل' : 'غير مُعدّ'}</span></div>
-    ${!hasTelegram ? '<div style="margin-top:8px;font-size:13px;color:var(--muted)">شغّل: <code style="color:#79c0ff">kassar telegram connect</code></div>' : ''}
-  </div>
-  <div class="card">
-    <h3>النظام</h3>
-    <div class="info-row"><span class="muted">الإصدار</span><span>${version}</span></div>
-    <div class="info-row"><span class="muted">المنفذ</span><span>${port}</span></div>
-    <div class="info-row"><span class="muted">التحديث</span><span style="font-size:12px">${now}</span></div>
-  </div>
-</div>
-<div class="card">
-  <h3>أوامر سريعة</h3>
-  <div style="margin-top:8px">
-    ${["kassar start","kassar stop","kassar status","kassar telegram connect","kassar doctor","kassar logs -f","kassar service install","kassar service start"].map(c =>
-      `<div class="cmd"><span>${c}</span><button class="btn" onclick="copy(this,'${c}')">نسخ</button></div>`
-    ).join("")}
-  </div>
-</div>
-<footer>
-  <p>kassar-agent v${version} — <a href="https://kassar-agent.replit.app" target="_blank">kassar-agent.replit.app</a></p>
-</footer>
-<script>
-function copy(btn,text){navigator.clipboard.writeText(text).then(()=>{const o=btn.textContent;btn.textContent='تم!';btn.style.color='#3fb950';setTimeout(()=>{btn.textContent=o;btn.style.color=''},1500)})}
-setTimeout(()=>location.reload(),30000);
-</script>
-</body>
-</html>`;
+function readPid(): number | null {
+  const pidFile = resolve(PROJECT_ROOT, "logs", "agent.pid");
+  const raw = readText(pidFile);
+  if (!raw) return null;
+  const pid = parseInt(raw.trim(), 10);
+  return isNaN(pid) ? null : pid;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function parseBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk.toString(); });
+    req.on("end",  () => resolve(body));
+    req.on("error", reject);
+  });
+}
+
+function json(res: ServerResponse, data: unknown, status = 200): void {
+  const body = JSON.stringify(data);
+  res.writeHead(status, {
+    "Content-Type":                "application/json",
+    "Access-Control-Allow-Origin": "*",
+    "Cache-Control":               "no-cache",
+  });
+  res.end(body);
+}
+
+function err(res: ServerResponse, message: string, status = 500): void {
+  json(res, { ok: false, error: message }, status);
+}
+
+// ─── API Handlers ─────────────────────────────────────────────────────────────
+
+function handleStatus(res: ServerResponse): void {
+  const cfg      = readJson(resolve(PROJECT_ROOT, "config.json")) as Record<string, unknown> | null;
+  const pid      = readPid();
+  const running  = pid !== null && isProcessAlive(pid);
+  const telegram = (cfg?.telegram as Record<string, unknown>) ?? {};
+  const agent    = (cfg?.agent   as Record<string, unknown>) ?? {};
+
+  json(res, {
+    ok: true,
+    running,
+    pid:      running ? pid : null,
+    version:  agent.version ?? "1.0.0",
+    name:     agent.name    ?? "kassar-agent",
+    telegram: {
+      configured: !!(telegram.botToken),
+      chatId:     telegram.chatId ?? "",
+    },
+    logLevel: (cfg?.logging as Record<string, unknown>)?.level ?? "info",
+    platform: process.platform,
+  });
+}
+
+function handleGetConfig(res: ServerResponse): void {
+  const cfg = readJson(resolve(PROJECT_ROOT, "config.json"));
+  if (!cfg) return err(res, "config.json not found", 404);
+  json(res, { ok: true, config: cfg });
+}
+
+async function handlePutConfig(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const body   = await parseBody(req);
+    const parsed = JSON.parse(body);
+    const cfgPath = resolve(PROJECT_ROOT, "config.json");
+    writeFileSync(cfgPath, JSON.stringify(parsed, null, 2), "utf-8");
+    json(res, { ok: true });
+  } catch (e) {
+    err(res, `Failed to save config: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+function handleGetLogs(req: IncomingMessage, res: ServerResponse): void {
+  const url    = new URL(req.url ?? "/", "http://localhost");
+  const lines  = parseInt(url.searchParams.get("lines") ?? "200", 10);
+  const logPath = resolve(PROJECT_ROOT, "logs", "app.log");
+
+  if (!existsSync(logPath)) {
+    return json(res, { ok: true, logs: [] });
+  }
+
+  try {
+    const raw     = readFileSync(logPath, "utf-8");
+    const allLines = raw.split("\n").filter(l => l.trim().length > 0);
+    const tail    = allLines.slice(-lines);
+
+    const parsed = tail.map((line, i) => {
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+        return {
+          id:      String(i),
+          ts:      obj["timestamp"] as string ?? new Date().toISOString(),
+          level:   ((obj["level"] as string) ?? "info").toLowerCase(),
+          source:  extractSource(obj["message"] as string ?? ""),
+          msg:     obj["message"] as string ?? line,
+        };
+      } catch {
+        return { id: String(i), ts: new Date().toISOString(), level: "info", source: "APP", msg: line };
+      }
+    });
+
+    json(res, { ok: true, logs: parsed });
+  } catch (e) {
+    err(res, `Failed to read logs: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+function extractSource(msg: string): string {
+  const m = msg.match(/\[([A-Z_]+)\]/);
+  return m ? m[1] : "APP";
+}
+
+function handleGetMemory(res: ServerResponse): void {
+  const memDir = resolve(PROJECT_ROOT, "memory");
+
+  const readJsonFile = (p: string) => readJson(p);
+
+  const user    = readJsonFile(join(memDir, "user.json"));
+  const rules   = readRulesDir(join(memDir, "rules"));
+  const sessions = readSessionsDir(join(memDir, "sessions"));
+  const project = readJsonFile(join(memDir, "project.json"))
+                ?? readFirstJsonIn(join(memDir, "projects"));
+
+  json(res, { ok: true, memory: { user, rules, sessions, project } });
+}
+
+function readRulesDir(dir: string): Record<string, string> {
+  if (!existsSync(dir)) return {};
+  const result: Record<string, string> = {};
+  try {
+    for (const f of readdirSync(dir)) {
+      if (f.endsWith(".json")) {
+        const content = readJson(join(dir, f));
+        if (content && typeof content === "object") {
+          Object.assign(result, content);
+        }
+      } else if (f.endsWith(".txt") || f.endsWith(".md")) {
+        result[f.replace(/\.[^.]+$/, "")] = readText(join(dir, f)) ?? "";
+      }
+    }
+  } catch { /* ignore */ }
+  return result;
+}
+
+function readSessionsDir(dir: string): unknown[] {
+  if (!existsSync(dir)) return [];
+  try {
+    return readdirSync(dir)
+      .filter(f => f.endsWith(".json"))
+      .sort()
+      .slice(-20)
+      .map(f => readJson(join(dir, f)))
+      .filter(Boolean);
+  } catch { return []; }
+}
+
+function readFirstJsonIn(dir: string): unknown {
+  if (!existsSync(dir)) return null;
+  try {
+    const files = readdirSync(dir).filter(f => f.endsWith(".json"));
+    if (files.length === 0) return null;
+    return readJson(join(dir, files[0]));
+  } catch { return null; }
+}
+
+function handleGetPrompts(res: ServerResponse): void {
+  const promptsDir = resolve(PROJECT_ROOT, "prompts");
+  const result: Record<string, string> = {};
+
+  if (existsSync(promptsDir)) {
+    try {
+      for (const f of readdirSync(promptsDir)) {
+        if (f.endsWith(".md") || f.endsWith(".txt")) {
+          const key = f.replace(/\.[^.]+$/, "");
+          result[key] = readText(join(promptsDir, f)) ?? "";
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  json(res, { ok: true, prompts: result });
+}
+
+async function handleAgentAction(
+  req: IncomingMessage,
+  res: ServerResponse,
+  action: "start" | "stop"
+): Promise<void> {
+  try {
+    if (action === "start") {
+      const { startAgent } = await import("./process-manager.js");
+      const { pid } = startAgent();
+      json(res, { ok: true, pid });
+    } else {
+      const { stopAgent } = await import("./process-manager.js");
+      const result = stopAgent();
+      json(res, { ok: true, ...result });
+    }
+  } catch (e) {
+    err(res, e instanceof Error ? e.message : String(e));
+  }
 }
 
 // ─── DashboardServer ──────────────────────────────────────────────────────────
@@ -151,31 +287,27 @@ export class DashboardServer {
     this.autoOpen = opts.autoOpen ?? true;
   }
 
-  get url(): string {
-    return `http://${this.host}:${this.port}`;
-  }
-
-  private get hasBuild(): boolean {
-    return existsSync(join(DASHBOARD_DIST, "index.html"));
-  }
+  get url(): string { return `http://${this.host}:${this.port}`; }
+  private get hasBuild(): boolean { return existsSync(join(DASHBOARD_DIST, "index.html")); }
 
   start(): Promise<void> {
     return new Promise((res, rej) => {
-      this.server = createServer((req: IncomingMessage, response: ServerResponse) => {
-        this.handle(req, response);
+      this.server = createServer((req, response) => {
+        this.handle(req, response).catch((e) => {
+          logger.error(`[DASHBOARD] request error: ${e}`);
+          if (!response.headersSent) {
+            err(response, "Internal server error");
+          }
+        });
       });
 
-      this.server.on("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EADDRINUSE") {
-          rej(new Error(`Port ${this.port} already in use — visit ${this.url}`));
-        } else {
-          rej(err);
-        }
+      this.server.on("error", (e: NodeJS.ErrnoException) => {
+        if (e.code === "EADDRINUSE") rej(new Error(`Port ${this.port} already in use — visit ${this.url}`));
+        else rej(e);
       });
 
       this.server.listen(this.port, this.host, () => {
-        const mode = this.hasBuild ? "React app" : "built-in page";
-        logger.info(`[DASHBOARD] serving ${mode} at ${this.url} (local only)`);
+        logger.info(`[DASHBOARD] at ${this.url} (local only, ${this.hasBuild ? "React app" : "built-in page"})`);
         if (this.autoOpen) this.openBrowser();
         res();
       });
@@ -183,43 +315,50 @@ export class DashboardServer {
   }
 
   stop(): void {
-    if (this.server) {
-      this.server.close();
-      this.server = null;
-      logger.info("[DASHBOARD] server stopped");
-    }
+    this.server?.close();
+    this.server = null;
+    logger.info("[DASHBOARD] stopped");
   }
 
-  private handle(req: IncomingMessage, res: ServerResponse): void {
-    // Simple JSON API for status
-    if (req.url === "/api/status") {
-      const cfg = getConfig();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, config: cfg }));
+  private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url    = req.url ?? "/";
+    const method = req.method?.toUpperCase() ?? "GET";
+
+    // CORS preflight
+    if (method === "OPTIONS") {
+      res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,PUT,POST", "Access-Control-Allow-Headers": "Content-Type" });
+      res.end();
       return;
     }
 
-    // If React build exists — serve it
-    if (this.hasBuild) {
-      this.serveStatic(req, res);
+    // ── API routes ──────────────────────────────────────────────
+    if (url.startsWith("/api/")) {
+      if (url === "/api/status"   && method === "GET") { handleStatus(res); return; }
+      if (url === "/api/config"   && method === "GET") { handleGetConfig(res); return; }
+      if (url === "/api/config"   && method === "PUT") { await handlePutConfig(req, res); return; }
+      if (url.startsWith("/api/logs") && method === "GET") { handleGetLogs(req, res); return; }
+      if (url === "/api/memory"   && method === "GET") { handleGetMemory(res); return; }
+      if (url === "/api/prompts"  && method === "GET") { handleGetPrompts(res); return; }
+      if (url === "/api/agent/start" && method === "POST") { await handleAgentAction(req, res, "start"); return; }
+      if (url === "/api/agent/stop"  && method === "POST") { await handleAgentAction(req, res, "stop"); return; }
+      // /api/healthz — compatibility
+      if (url === "/api/healthz") { json(res, { status: "ok" }); return; }
+
+      err(res, "Not found", 404);
       return;
     }
 
-    // Fallback: serve embedded HTML
-    const html = buildFallbackHTML(this.port);
-    res.writeHead(200, {
-      "Content-Type":    "text/html; charset=utf-8",
-      "Cache-Control":   "no-cache",
-      "X-Frame-Options": "DENY",
-    });
-    res.end(html);
+    // ── Static files ────────────────────────────────────────────
+    if (this.hasBuild) { this.serveStatic(url, res); return; }
+
+    // ── Fallback: built-in status page ──────────────────────────
+    this.serveFallback(res);
   }
 
-  private serveStatic(req: IncomingMessage, res: ServerResponse): void {
-    let pathname = req.url?.split("?")[0] ?? "/";
+  private serveStatic(url: string, res: ServerResponse): void {
+    let pathname = url.split("?")[0];
     let filePath = join(DASHBOARD_DIST, pathname);
 
-    // SPA fallback
     const hasExt = extname(pathname).length > 0;
     if (!hasExt || !existsSync(filePath)) {
       filePath = join(DASHBOARD_DIST, "index.html");
@@ -240,8 +379,39 @@ export class DashboardServer {
       "Content-Length": size,
       "Cache-Control":  ext === ".html" ? "no-cache" : "public, max-age=31536000, immutable",
     });
-
     createReadStream(filePath).pipe(res);
+  }
+
+  private serveFallback(res: ServerResponse): void {
+    const cfg        = readJson(resolve(PROJECT_ROOT, "config.json")) as Record<string, unknown> | null;
+    const version    = (cfg?.agent as Record<string, unknown>)?.version ?? "1.0.0";
+    const hasTelegram = !!(cfg?.telegram as Record<string, unknown>)?.botToken;
+    const pid        = readPid();
+    const running    = pid !== null && isProcessAlive(pid);
+    const now        = new Date().toLocaleString("ar-SA");
+
+    const html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head>
+<meta charset="UTF-8"><title>Kassar Agent</title>
+<style>
+body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',Arial,sans-serif;padding:24px}
+.logo{font-size:28px;font-weight:700;color:#58a6ff}.badge{background:#161b22;border:1px solid #30363d;color:#8b949e;padding:2px 10px;border-radius:20px;font-size:12px;margin-right:8px}
+.notice{background:#111d11;border:1px solid #2ea043;border-radius:8px;padding:12px;margin:16px 0;color:#3fb950;font-size:13px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:20px;margin-bottom:16px}
+.cmd{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 14px;margin:6px 0;font-family:Consolas,monospace;font-size:13px;color:#79c0ff}
+</style></head><body>
+<div><span class="logo">kassar</span><span class="badge">v${version}</span><span class="badge" style="color:#3fb950;border-color:#2ea043">&#128274; محلي فقط</span></div>
+<div class="notice">&#9989; يعمل على http://127.0.0.1:${this.port} — جهازك وحده</div>
+<div class="card"><b>الحالة:</b> ${running ? '&#9989; يعمل' : '&#9940; متوقف'} | Telegram: ${hasTelegram ? '&#10003; مُعدّ' : '&#10007; غير مُعدّ'} | ${now}</div>
+<div class="card"><b>API متاح:</b><br>
+<div class="cmd">GET /api/status</div><div class="cmd">GET /api/config</div>
+<div class="cmd">GET /api/logs?lines=100</div><div class="cmd">GET /api/memory</div>
+<div class="cmd">POST /api/agent/start</div><div class="cmd">POST /api/agent/stop</div>
+</div>
+<script>setTimeout(()=>location.reload(),15000)</script>
+</body></html>`;
+
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+    res.end(html);
   }
 
   private openBrowser(): void {
@@ -253,8 +423,6 @@ export class DashboardServer {
       } else {
         spawnSync("xdg-open", [this.url]);
       }
-    } catch {
-      logger.debug(`[DASHBOARD] could not auto-open — visit ${this.url}`);
-    }
+    } catch { /* ignore */ }
   }
 }
