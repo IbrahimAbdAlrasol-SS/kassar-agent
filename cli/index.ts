@@ -291,6 +291,22 @@ program
       failed++;
     }
 
+    const apiKey = cfg.model?.apiKey || process.env["OPENAI_API_KEY"] || "";
+    if (apiKey.length > 0) {
+      const masked =
+        apiKey.length > 8
+          ? apiKey.slice(0, 7) + "****" + apiKey.slice(-4)
+          : "****";
+      ok(`OpenAI API key found (${masked})  model=${cfg.model?.model ?? "gpt-4o-mini"}`);
+      passed++;
+    } else if (process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"]) {
+      ok("Replit AI integrations configured (running on Replit)");
+      passed++;
+    } else {
+      fail("OpenAI API key not set — run kassar openai connect");
+      failed++;
+    }
+
     for (const dir of REQUIRED_DIRS) {
       if (existsSync(dir)) {
         ok(`Directory exists: ${dir}`);
@@ -494,6 +510,58 @@ telegramCmd
     logger.info("Telegram bot token updated via CLI");
 
     info("Run \x1b[1mkassar doctor\x1b[0m to verify your setup.");
+    console.log();
+  });
+
+const openaiCmd = program
+  .command("openai")
+  .description("Manage OpenAI API key");
+
+openaiCmd
+  .command("connect")
+  .description("Interactively set and save your OpenAI API key")
+  .option("--model <model>", "Model name to use", "gpt-4o-mini")
+  .option("--base-url <url>", "Custom base URL (for OpenAI-compatible APIs)")
+  .action(async (opts: { model: string; baseUrl?: string }) => {
+    logger.info("CLI: kassar openai connect");
+    section("OpenAI Setup");
+
+    const cfg = loadConfig();
+    const existing = cfg.model?.apiKey;
+    if (existing) {
+      const masked = existing.length > 8
+        ? existing.slice(0, 7) + "****" + existing.slice(-4)
+        : "****";
+      info(`Current API key: ${masked}`);
+    }
+
+    console.log("  Get your API key from \x1b[4mhttps://platform.openai.com/api-keys\x1b[0m\n");
+
+    const apiKey = await prompt("  Enter OPENAI_API_KEY: ", true);
+
+    if (!apiKey) {
+      fail("No API key entered. Aborted.");
+      process.exit(1);
+    }
+
+    if (!apiKey.startsWith("sk-")) {
+      fail('API key format looks wrong. Expected to start with "sk-"');
+      process.exit(1);
+    }
+
+    const cfgObj = cfg as unknown as Record<string, unknown>;
+    setNestedValue(cfgObj, "model.apiKey",  apiKey);
+    setNestedValue(cfgObj, "model.model",   opts.model);
+    if (opts.baseUrl) setNestedValue(cfgObj, "model.baseURL", opts.baseUrl);
+    writeConfig(cfgObj as unknown as AgentConfig);
+
+    ok(`OpenAI API key saved to config.json`);
+    ok(`Model: ${opts.model}`);
+    if (opts.baseUrl) ok(`Base URL: ${opts.baseUrl}`);
+    logger.info(`OpenAI API key updated via CLI  model=${opts.model}`);
+
+    info("Run \x1b[1mkassar doctor\x1b[0m to verify your setup.");
+    info("Run \x1b[1mkassar start\x1b[0m to launch the agent.");
     console.log();
   });
 
