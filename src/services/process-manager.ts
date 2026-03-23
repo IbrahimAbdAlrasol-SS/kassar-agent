@@ -7,21 +7,19 @@ import {
 } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { logger } from "../utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const __dirname  = dirname(__filename);
 
-const PROJECT_ROOT = resolve(__dirname, "..", "..");
-const PID_FILE = resolve(PROJECT_ROOT, "logs", "agent.pid");
+const PROJECT_ROOT  = resolve(__dirname, "..", "..");
+const PID_FILE      = resolve(PROJECT_ROOT, "logs", "agent.pid");
 const GATEWAY_ENTRY = resolve(PROJECT_ROOT, "src", "core", "gateway.ts");
 
 function ensureLogsDir(): void {
   const logsDir = resolve(PROJECT_ROOT, "logs");
-  if (!existsSync(logsDir)) {
-    mkdirSync(logsDir, { recursive: true });
-  }
+  if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true });
 }
 
 export function writePid(pid: number): void {
@@ -37,9 +35,7 @@ export function readPid(): number | null {
 }
 
 export function removePid(): void {
-  if (existsSync(PID_FILE)) {
-    unlinkSync(PID_FILE);
-  }
+  if (existsSync(PID_FILE)) unlinkSync(PID_FILE);
 }
 
 export function isProcessAlive(pid: number): boolean {
@@ -59,13 +55,9 @@ export interface AgentStatus {
 
 export function getAgentStatus(): AgentStatus {
   const pid = readPid();
-  if (pid === null) {
-    return { running: false, pid: null, pidFile: PID_FILE };
-  }
+  if (pid === null) return { running: false, pid: null, pidFile: PID_FILE };
   const running = isProcessAlive(pid);
-  if (!running) {
-    removePid();
-  }
+  if (!running) removePid();
   return { running, pid: running ? pid : null, pidFile: PID_FILE };
 }
 
@@ -76,17 +68,34 @@ export function startAgent(): { pid: number } {
     return { pid: status.pid };
   }
 
-  const tsxBin = resolve(PROJECT_ROOT, "node_modules", ".bin", "tsx");
-  const bin = existsSync(tsxBin) ? tsxBin : "tsx";
+  const isWin    = process.platform === "win32";
+  const tsxCmd   = resolve(PROJECT_ROOT, "node_modules", ".bin", "tsx.cmd");
+  const tsxSh    = resolve(PROJECT_ROOT, "node_modules", ".bin", "tsx");
 
-  const child = spawn(bin, [GATEWAY_ENTRY], {
-    detached: true,
-    stdio: "ignore",
-    env: { ...process.env },
-  });
+  let child;
+
+  if (isWin) {
+    // On Windows, .cmd files must be invoked through cmd /c
+    const tsxBin = existsSync(tsxCmd) ? tsxCmd : "tsx";
+    child = spawn("cmd", ["/c", tsxBin, GATEWAY_ENTRY], {
+      detached: true,
+      stdio:    "ignore",
+      env:      { ...process.env },
+    });
+  } else {
+    const bin = existsSync(tsxSh) ? tsxSh : "tsx";
+    child = spawn(bin, [GATEWAY_ENTRY], {
+      detached: true,
+      stdio:    "ignore",
+      env:      { ...process.env },
+    });
+  }
 
   if (child.pid === undefined) {
-    throw new Error("Failed to spawn agent process — no PID assigned");
+    throw new Error(
+      "Failed to spawn agent process — no PID assigned.\n" +
+      "Make sure Node.js and tsx are installed correctly."
+    );
   }
 
   child.unref();
@@ -103,7 +112,15 @@ export function stopAgent(): { stopped: boolean; pid: number | null } {
   }
 
   try {
-    process.kill(status.pid, "SIGTERM");
+    if (process.platform === "win32") {
+      // On Windows use taskkill for reliable process termination
+      spawnSync("taskkill", ["/PID", String(status.pid), "/F"], {
+        encoding:    "utf8",
+        windowsHide: true,
+      });
+    } else {
+      process.kill(status.pid, "SIGTERM");
+    }
     removePid();
     logger.info(`Agent stopped (PID ${status.pid})`);
     return { stopped: true, pid: status.pid };
