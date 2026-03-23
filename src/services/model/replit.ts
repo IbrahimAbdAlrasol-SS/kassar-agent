@@ -6,6 +6,7 @@ import { logger } from "../../utils/logger.js";
 import type { ModelRequest, ModelResponse, AgentMessage } from "../../core/types.js";
 import { buildSmartContext } from "../../memory/recall.js";
 import type { MemoryContext } from "../../memory/types.js";
+import { loadConfig } from "../../config/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = path.resolve(__dirname, "../../../prompts");
@@ -159,12 +160,33 @@ function parseDecision(raw: string): ModelDecision {
 let client: OpenAI | null = null;
 
 function getClient(): OpenAI {
-  if (!client) {
-    const baseURL = process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"];
-    const apiKey  = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] ?? "replit";
-    if (!baseURL) throw new Error("AI_INTEGRATIONS_OPENAI_BASE_URL is not set");
-    client = new OpenAI({ apiKey, baseURL });
+  if (client) return client;
+
+  // ── Priority 1: Replit AI Integrations (running inside Replit) ──
+  const replitBaseURL = process.env["AI_INTEGRATIONS_OPENAI_BASE_URL"];
+  if (replitBaseURL) {
+    const apiKey = process.env["AI_INTEGRATIONS_OPENAI_API_KEY"] ?? "replit";
+    MODEL_LOG(`provider=replit-ai  baseURL=${replitBaseURL}`);
+    client = new OpenAI({ apiKey, baseURL: replitBaseURL });
+    return client;
   }
+
+  // ── Priority 2: config.json [model] section ──
+  const cfg      = loadConfig();
+  const modelCfg = cfg.model;
+
+  const apiKey = modelCfg?.apiKey || process.env["OPENAI_API_KEY"] || "";
+  if (!apiKey) {
+    throw new Error(
+      "OpenAI API key not configured.\n" +
+      "Run: kassar config set model.apiKey sk-...\n" +
+      "Or set the OPENAI_API_KEY environment variable."
+    );
+  }
+
+  const baseURL = modelCfg?.baseURL || "https://api.openai.com/v1";
+  MODEL_LOG(`provider=openai  baseURL=${baseURL}  model=${modelCfg?.model ?? "gpt-4o-mini"}`);
+  client = new OpenAI({ apiKey, baseURL });
   return client;
 }
 
@@ -177,10 +199,15 @@ export async function callModel(req: ModelRequest): Promise<ModelDecision> {
     `  content="${req.content.slice(0, 80)}"`,
   );
 
+  const cfg      = loadConfig();
+  const modelCfg = cfg.model;
+  const modelName  = modelCfg?.model || "gpt-4o-mini";
+  const maxTokens  = modelCfg?.maxCompletionTokens || 1280;
+
   const completion = await getClient().chat.completions.create({
-    model: "gpt-5-mini",
+    model: modelName,
     messages,
-    max_completion_tokens: 1280,
+    max_completion_tokens: maxTokens,
   });
 
   const raw     = (completion.choices[0]?.message?.content ?? "").trim();
