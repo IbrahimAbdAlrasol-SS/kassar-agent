@@ -1,0 +1,25 @@
+{
+  "agent": {
+    "name": "kassar-agent",
+    "version": "1.0.0",
+    "maxRetries": 3,
+    "retryDelayMs": 1000
+  },
+  "logging": {
+    "level": "info",
+    "file": "logs/app.log",
+    "maxSize": "10m",
+    "maxFiles": 5
+  },
+  "api": {
+    "baseUrl": "http://localhost:3000",
+    "timeoutMs": 30000
+  },
+  "workspace": {
+    "dir": "./workspace"
+  },
+  "telegram": {
+    "botToken": "8218858347:AAHhUsdyW_055YCNF_FNIiwn4q4OvHhSNrk",
+    "chatId": "6224395577"
+  }
+}
