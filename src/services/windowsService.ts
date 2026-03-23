@@ -1,12 +1,12 @@
 /**
  * windowsService.ts
  *
- * Manages kassar-agent as a Windows Service via sc.exe.
- * All functions throw with a clear message on non-Windows platforms.
+ * Manages kassar-agent auto-start via Windows Task Scheduler (schtasks.exe).
+ * Task Scheduler works with ANY executable — no Windows Service protocol needed.
  *
- * PRODUCTION NOTE: The service runs the agent via `node + tsx`.
- * For locked-down production environments, pre-compile to JS first
- * and update `scriptPath` to point to the compiled entry point.
+ * Task name : KassarAgent
+ * Trigger   : At user logon (ONLOGON)
+ * Action    : cmd /c kassar.cmd start
  */
 
 import { spawnSync } from "child_process";
@@ -15,8 +15,8 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { logger } from "../utils/logger.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = dirname(__filename);
+const __filename   = fileURLToPath(import.meta.url);
+const __dirname    = dirname(__filename);
 const PROJECT_ROOT = resolve(__dirname, "../../");
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -38,7 +38,7 @@ export interface ServiceStatus {
   error?:     string;
 }
 
-// ─── Defaults ────────────────────────────────────────────────────────────────
+// ─── Defaults ─────────────────────────────────────────────────────────────────
 
 export const defaultServiceConfig: WindowsServiceConfig = {
   serviceName: "KassarAgent",
@@ -63,96 +63,57 @@ function requireWindows(operation: string): void {
   }
 }
 
-// ─── sc.exe helpers ───────────────────────────────────────────────────────────
+// ─── Task Scheduler helpers ───────────────────────────────────────────────────
 
-/**
- * Query service state via `sc query` + `sc qc`.
- * Returns safe defaults (not installed) on any failure.
- */
-function scQuery(serviceName: string): { installed: boolean; state: string; startType: string } {
-  const queryResult = spawnSync("sc", ["query", serviceName], {
-    encoding: "buffer",
-    windowsHide: true,
-  });
+function queryTask(taskName: string): { exists: boolean; status: string } {
+  const result = spawnSync(
+    "schtasks",
+    ["/Query", "/TN", taskName, "/FO", "CSV", "/NH"],
+    { encoding: "buffer", windowsHide: true }
+  );
 
-  // Decode output — Windows may use CP1256/OEM; convert to string safely
-  const rawOut = queryResult.stdout
-    ? queryResult.stdout.toString("utf8").replace(/\r/g, "")
-    : "";
-  const rawErr = queryResult.stderr
-    ? queryResult.stderr.toString("utf8")
-    : "";
+  const stdout  = result.stdout ? result.stdout.toString("utf8") : "";
+  const stderr  = result.stderr ? result.stderr.toString("utf8") : "";
+  const notFound =
+    result.status !== 0 ||
+    stderr.toLowerCase().includes("error") ||
+    stdout.trim().length === 0;
 
-  // sc query exits non-zero OR output contains "FAILED" / "1060" when not installed
-  const notInstalled =
-    queryResult.status !== 0 ||
-    rawOut.includes("FAILED")    ||
-    rawErr.includes("FAILED")    ||
-    rawOut.includes("1060")      ||
-    rawErr.includes("1060")      ||
-    rawOut.trim().length === 0;
+  if (notFound) return { exists: false, status: "NOT_FOUND" };
 
-  if (notInstalled) {
-    return { installed: false, state: "NOT_INSTALLED", startType: "unknown" };
-  }
-
-  const stateMatch = rawOut.match(/STATE\s*:\s*\d+\s+(\w+)/);
-  const state      = stateMatch?.[1] ?? "UNKNOWN";
-
-  // Query config for start type
-  const qcResult = spawnSync("sc", ["qc", serviceName], {
-    encoding: "buffer",
-    windowsHide: true,
-  });
-  const qcOut      = qcResult.stdout ? qcResult.stdout.toString("utf8") : "";
-  const startMatch = qcOut.match(/START_TYPE\s*:\s*\d+\s+([\w_]+)/);
-  const startType  = startMatch?.[1] ?? "UNKNOWN";
-
-  return { installed: true, state, startType };
+  // CSV line: "\\TaskName","Next Run Time","Status"
+  const parts     = stdout.trim().split(",");
+  const rawStatus = (parts[2] ?? "Unknown").replace(/"/g, "").trim();
+  return { exists: true, status: rawStatus };
 }
 
-/**
- * Build the binPath string for `sc create`.
- *
- * sc.exe expects: binPath= "C:\node.exe" "C:\tsx.cmd" "C:\cli\index.ts" start --foreground
- *
- * Notes:
- * - tsx.cmd is preferred; falls back to tsx (must be on PATH)
- * - Paths with spaces must be individually double-quoted inside the binPath
- */
-function buildBinPath(scriptPath: string): string {
-  const nodeExe = process.execPath;
-
-  const tsxCmd = resolve(PROJECT_ROOT, "node_modules", ".bin", "tsx.cmd");
-  const tsxSh  = resolve(PROJECT_ROOT, "node_modules", ".bin", "tsx");
-  const tsxBin = existsSync(tsxCmd) ? tsxCmd : existsSync(tsxSh) ? tsxSh : "tsx";
-
-  // Each component is individually quoted to handle spaces in paths
-  return `"${nodeExe}" "${tsxBin}" "${scriptPath}" start --foreground`;
+/** Path to kassar.cmd — lives one level up from src/ in bin/ */
+function kassarCmdPath(): string {
+  return resolve(PROJECT_ROOT, "..", "bin", "kassar.cmd");
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export function getServiceStatus(cfg: WindowsServiceConfig = defaultServiceConfig): ServiceStatus {
-  logger.debug("[SERVICE] status checked");
-
   if (!isWindows()) {
     return {
       installed: false,
       running:   false,
       autoStart: false,
       state:     "NOT_SUPPORTED",
-      error:     `Windows service support is not available on ${process.platform}.`,
+      error:     "Task Scheduler support is only available on Windows.",
     };
   }
 
-  const { installed, state, startType } = scQuery(cfg.serviceName);
+  const { exists, status } = queryTask(cfg.serviceName);
+  logger.debug(`[SERVICE] status: task=${cfg.serviceName} exists=${exists} status=${status}`);
+
   return {
-    installed,
-    running:   state === "RUNNING",
-    autoStart: startType === "AUTO_START",
-    state,
-    startType,
+    installed: exists,
+    running:   status === "Running",
+    autoStart: exists,
+    state:     exists ? status : "NOT_INSTALLED",
+    startType: exists ? "ONLOGON" : "unknown",
   };
 }
 
@@ -160,74 +121,58 @@ export function installService(cfg: WindowsServiceConfig = defaultServiceConfig)
   requireWindows("install");
   logger.info(`[SERVICE] install requested — name=${cfg.serviceName}`);
 
-  // Refuse to install if already registered
-  const { installed } = scQuery(cfg.serviceName);
-  if (installed) {
+  const { exists } = queryTask(cfg.serviceName);
+  if (exists) {
     throw new Error(
-      `Service "${cfg.serviceName}" is already installed.\n` +
+      `Task "${cfg.serviceName}" is already installed.\n` +
       `Run: kassar service uninstall  — then install again.`
     );
   }
 
-  const binPath   = buildBinPath(cfg.scriptPath);
-  const startType = cfg.autoStart ? "auto" : "demand";
+  const cmdPath  = kassarCmdPath();
+  const taskCmd  = existsSync(cmdPath)
+    ? `cmd /c "${cmdPath}" start`
+    : `cmd /c kassar start`;
 
-  // sc.exe arg format: key= value  (space required between = and value)
   const { status, stderr } = spawnSync(
-    "sc",
+    "schtasks",
     [
-      "create", cfg.serviceName,
-      "binPath=", binPath,
-      "DisplayName=", cfg.displayName,
-      "start=", startType,
+      "/Create",
+      "/SC",  "ONLOGON",
+      "/TN",  cfg.serviceName,
+      "/TR",  taskCmd,
+      "/RL",  "HIGHEST",
+      "/F",
     ],
-    { encoding: "utf8", windowsHide: true }
+    { encoding: "buffer", windowsHide: true }
   );
 
+  const errOut = stderr ? stderr.toString("utf8").trim() : "";
   if (status !== 0) {
-    const detail = stderr?.trim() || "sc.exe returned non-zero exit code";
-    const msg    = `Failed to install service "${cfg.serviceName}": ${detail}`;
+    const msg = `Failed to create scheduled task "${cfg.serviceName}": ${errOut || "schtasks returned non-zero exit code"}`;
     logger.error(`[SERVICE] error — ${msg}`);
     throw new Error(msg);
   }
 
-  // Set description (non-critical — log warn on failure, don't abort)
-  const descResult = spawnSync(
-    "sc",
-    ["description", cfg.serviceName, cfg.description],
-    { encoding: "utf8", windowsHide: true }
-  );
-  if (descResult.status !== 0) {
-    logger.warn(`[SERVICE] could not set description for "${cfg.serviceName}"`);
-  }
-
-  logger.info(`[SERVICE] installed — name=${cfg.serviceName} autoStart=${cfg.autoStart}`);
+  logger.info(`[SERVICE] installed — name=${cfg.serviceName} trigger=ONLOGON`);
 }
 
 export function uninstallService(cfg: WindowsServiceConfig = defaultServiceConfig): void {
   requireWindows("uninstall");
   logger.info(`[SERVICE] uninstall requested — name=${cfg.serviceName}`);
 
-  const { installed, state } = scQuery(cfg.serviceName);
-  if (!installed) {
-    throw new Error(`Service "${cfg.serviceName}" is not installed.`);
-  }
+  const { exists } = queryTask(cfg.serviceName);
+  if (!exists) throw new Error(`Task "${cfg.serviceName}" is not installed.`);
 
-  // Stop if running before deleting
-  if (state === "RUNNING") {
-    logger.info(`[SERVICE] stopping before uninstall — name=${cfg.serviceName}`);
-    const stopResult = spawnSync("sc", ["stop", cfg.serviceName], { encoding: "utf8", windowsHide: true });
-    if (stopResult.status !== 0) {
-      logger.warn(`[SERVICE] could not stop service before uninstall (will attempt delete anyway)`);
-    }
-    // Brief polling wait — sc delete may fail if service hasn't fully stopped
-    waitForState(cfg.serviceName, "STOPPED", 5000);
-  }
+  const { status, stderr } = spawnSync(
+    "schtasks",
+    ["/Delete", "/TN", cfg.serviceName, "/F"],
+    { encoding: "buffer", windowsHide: true }
+  );
 
-  const { status, stderr } = spawnSync("sc", ["delete", cfg.serviceName], { encoding: "utf8", windowsHide: true });
+  const errOut = stderr ? stderr.toString("utf8").trim() : "";
   if (status !== 0) {
-    const detail = stderr?.trim() || "sc.exe returned non-zero exit code";
-    const msg    = `Failed to uninstall service "${cfg.serviceName}": ${detail}`;
+    const msg = `Failed to delete task "${cfg.serviceName}": ${errOut}`;
     logger.error(`[SERVICE] error — ${msg}`);
     throw new Error(msg);
   }
@@ -239,20 +184,23 @@ export function startService(cfg: WindowsServiceConfig = defaultServiceConfig): 
   requireWindows("start");
   logger.info(`[SERVICE] start requested — name=${cfg.serviceName}`);
 
-  const { installed, state } = scQuery(cfg.serviceName);
-  if (!installed) {
+  const { exists } = queryTask(cfg.serviceName);
+  if (!exists) {
     throw new Error(
-      `Service "${cfg.serviceName}" is not installed.\nRun: kassar service install`
+      `Task "${cfg.serviceName}" is not installed.\nRun: kassar service install`
     );
   }
-  if (state === "RUNNING") {
-    throw new Error(`Service "${cfg.serviceName}" is already running.`);
-  }
 
-  const { status, stderr } = spawnSync("sc", ["start", cfg.serviceName], { encoding: "utf8", windowsHide: true });
+  // /Run triggers the task immediately (runs kassar start in background)
+  const { status, stderr } = spawnSync(
+    "schtasks",
+    ["/Run", "/TN", cfg.serviceName],
+    { encoding: "buffer", windowsHide: true }
+  );
+
+  const errOut = stderr ? stderr.toString("utf8").trim() : "";
   if (status !== 0) {
-    const detail = stderr?.trim() || "sc.exe returned non-zero exit code";
-    const msg    = `Failed to start service "${cfg.serviceName}": ${detail}`;
+    const msg = `Failed to run task "${cfg.serviceName}": ${errOut || "schtasks returned non-zero exit code"}`;
     logger.error(`[SERVICE] error — ${msg}`);
     throw new Error(msg);
   }
@@ -264,18 +212,19 @@ export function stopService(cfg: WindowsServiceConfig = defaultServiceConfig): v
   requireWindows("stop");
   logger.info(`[SERVICE] stop requested — name=${cfg.serviceName}`);
 
-  const { installed, state } = scQuery(cfg.serviceName);
-  if (!installed) {
-    throw new Error(`Service "${cfg.serviceName}" is not installed.`);
-  }
-  if (state !== "RUNNING") {
-    throw new Error(`Service "${cfg.serviceName}" is not running (state: ${state}).`);
-  }
+  const { exists } = queryTask(cfg.serviceName);
+  if (!exists) throw new Error(`Task "${cfg.serviceName}" is not installed.`);
 
-  const { status, stderr } = spawnSync("sc", ["stop", cfg.serviceName], { encoding: "utf8", windowsHide: true });
+  // /End terminates a currently running instance of the task
+  const { status, stderr } = spawnSync(
+    "schtasks",
+    ["/End", "/TN", cfg.serviceName],
+    { encoding: "buffer", windowsHide: true }
+  );
+
+  const errOut = stderr ? stderr.toString("utf8").trim() : "";
   if (status !== 0) {
-    const detail = stderr?.trim() || "sc.exe returned non-zero exit code";
-    const msg    = `Failed to stop service "${cfg.serviceName}": ${detail}`;
+    const msg = `Failed to stop task "${cfg.serviceName}": ${errOut}`;
     logger.error(`[SERVICE] error — ${msg}`);
     throw new Error(msg);
   }
@@ -287,42 +236,8 @@ export function restartService(cfg: WindowsServiceConfig = defaultServiceConfig)
   requireWindows("restart");
   logger.info(`[SERVICE] restart requested — name=${cfg.serviceName}`);
 
-  const { installed, state } = scQuery(cfg.serviceName);
-  if (!installed) {
-    throw new Error(`Service "${cfg.serviceName}" is not installed.`);
-  }
-
-  if (state === "RUNNING") {
-    stopService(cfg);
-    const stopped = waitForState(cfg.serviceName, "STOPPED", 8000);
-    if (!stopped) {
-      throw new Error(
-        `Service "${cfg.serviceName}" did not stop within 8 seconds. Restart aborted.`
-      );
-    }
-  }
-
+  try { stopService(cfg); } catch { /* ignore if not running */ }
   startService(cfg);
+
   logger.info(`[SERVICE] restarted — name=${cfg.serviceName}`);
-}
-
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-/**
- * Busy-poll until the service reaches the target state or the deadline passes.
- * Uses Atomics.wait to avoid spinning at 100% CPU.
- * Returns true if the target state was reached, false on timeout.
- */
-function waitForState(serviceName: string, targetState: string, timeoutMs: number): boolean {
-  const deadline = Date.now() + timeoutMs;
-  const shared   = new SharedArrayBuffer(4);
-  const arr      = new Int32Array(shared);
-
-  while (Date.now() < deadline) {
-    const { state } = scQuery(serviceName);
-    if (state === targetState) return true;
-    // Wait up to 500ms between polls without spinning
-    Atomics.wait(arr, 0, 0, 500);
-  }
-  return false;
 }
