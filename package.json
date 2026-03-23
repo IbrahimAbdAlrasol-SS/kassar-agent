@@ -1,5 +1,5 @@
 {
-  "name": "@workspace/kassar-agent",
+  "name": "kassar-agent",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -23,9 +23,9 @@
     "winston": "^3.17.0"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
+    "@types/node": "^25.3.3",
     "@types/node-telegram-bot-api": "^0.64.14",
-    "tsx": "catalog:",
+    "tsx": "^4.21.0",
     "typescript": "~5.9.2"
   }
 }
