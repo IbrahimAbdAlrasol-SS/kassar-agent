@@ -1,0 +1,9 @@
+node_modules/
+dist/
+logs/
+memory/
+temp/
+workspace/
+*.log
+.env
+config.json
