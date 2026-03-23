@@ -71,22 +71,40 @@ function requireWindows(operation: string): void {
  */
 function scQuery(serviceName: string): { installed: boolean; state: string; startType: string } {
   const queryResult = spawnSync("sc", ["query", serviceName], {
-    encoding: "utf8",
+    encoding: "buffer",
     windowsHide: true,
   });
 
-  // sc query exits with non-zero and includes "FAILED" when service doesn't exist
-  const stdout = queryResult.stdout ?? "";
-  if (queryResult.status !== 0 || stdout.includes("FAILED")) {
+  // Decode output — Windows may use CP1256/OEM; convert to string safely
+  const rawOut = queryResult.stdout
+    ? queryResult.stdout.toString("utf8").replace(/\r/g, "")
+    : "";
+  const rawErr = queryResult.stderr
+    ? queryResult.stderr.toString("utf8")
+    : "";
+
+  // sc query exits non-zero OR output contains "FAILED" / "1060" when not installed
+  const notInstalled =
+    queryResult.status !== 0 ||
+    rawOut.includes("FAILED")    ||
+    rawErr.includes("FAILED")    ||
+    rawOut.includes("1060")      ||
+    rawErr.includes("1060")      ||
+    rawOut.trim().length === 0;
+
+  if (notInstalled) {
     return { installed: false, state: "NOT_INSTALLED", startType: "unknown" };
   }
 
-  const stateMatch = stdout.match(/STATE\s*:\s*\d+\s+(\w+)/);
+  const stateMatch = rawOut.match(/STATE\s*:\s*\d+\s+(\w+)/);
   const state      = stateMatch?.[1] ?? "UNKNOWN";
 
   // Query config for start type
-  const qcResult   = spawnSync("sc", ["qc", serviceName], { encoding: "utf8", windowsHide: true });
-  const qcOut      = qcResult.stdout ?? "";
+  const qcResult = spawnSync("sc", ["qc", serviceName], {
+    encoding: "buffer",
+    windowsHide: true,
+  });
+  const qcOut      = qcResult.stdout ? qcResult.stdout.toString("utf8") : "";
   const startMatch = qcOut.match(/START_TYPE\s*:\s*\d+\s+([\w_]+)/);
   const startType  = startMatch?.[1] ?? "UNKNOWN";
 
