@@ -14,8 +14,7 @@
 $OutputEncoding            = [System.Text.Encoding]::UTF8
 chcp 65001 | Out-Null
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 # --- Config -------------------------------------------------------------------
 $AGENT_NAME    = "kassar-agent"
@@ -148,21 +147,20 @@ if (Test-Path "$SRC_DIR\.git") {
 # --- Install dependencies -----------------------------------------------------
 Write-Header "Installing dependencies"
 
-try {
-    Set-Location $SRC_DIR
-    Write-Step "Running npm install (this may take a minute)..."
-    $npmOut = npm install --prefer-offline 2>&1
-    Write-Ok "Dependencies installed"
-} catch {
-    Write-Fail "npm install failed: $($_.Exception.Message)"
+Set-Location $SRC_DIR
+Write-Step "Running npm install (this may take a minute)..."
+& npm install
+if ($LASTEXITCODE -ne 0) {
+    Write-Fail "npm install failed (exit code: $LASTEXITCODE)"
     exit 1
 }
+Write-Ok "Dependencies installed"
 
 # --- Create kassar.cmd launcher -----------------------------------------------
 Write-Header "Creating launcher"
 
-$nodePath   = (Get-Command node -ErrorAction SilentlyContinue)?.Source
-if (-not $nodePath) { $nodePath = "node" }
+$nodeCmd  = Get-Command node -ErrorAction SilentlyContinue
+$nodePath = if ($nodeCmd) { $nodeCmd.Source } else { "node" }
 
 $tsxPath    = "$SRC_DIR\node_modules\.bin\tsx.cmd"
 $cliEntry   = "$SRC_DIR\cli\index.ts"
@@ -174,7 +172,11 @@ if (Test-Path $tsxPath) {
     # Build first, then use compiled output
     Write-Step "Building TypeScript..."
     Set-Location $SRC_DIR
-    npm run build 2>&1 | Out-Null
+    & npm run build
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "TypeScript build failed"
+        exit 1
+    }
     $launchCmd = "`"$nodePath`" `"$SRC_DIR\dist\cli\index.js`""
     Write-Ok "Built successfully"
 }
