@@ -200,6 +200,23 @@ if ($currentPath -notlike "*$BIN_DIR*") {
 # --- Initial config -----------------------------------------------------------
 Write-Header "Creating initial configuration"
 
+# --- Ask for OpenAI API key ---------------------------------------------------
+Write-Header "OpenAI API Key"
+Write-Host "  Get your key from: https://platform.openai.com/api-keys" -ForegroundColor Cyan
+Write-Host ""
+
+$OPENAI_KEY = ""
+$OPENAI_KEY_RAW = Read-Host "  Enter your OpenAI API key (sk-...) [press Enter to skip]"
+if ($OPENAI_KEY_RAW -match "^sk-") {
+    $OPENAI_KEY = $OPENAI_KEY_RAW.Trim()
+    Write-Ok "API key accepted"
+} elseif ($OPENAI_KEY_RAW.Length -gt 0) {
+    Write-Warn "Key format looks wrong (should start with sk-). You can set it later:"
+    Write-Warn "  kassar config set model.apiKey sk-..."
+} else {
+    Write-Warn "Skipped. Set it later with: kassar config set model.apiKey sk-..."
+}
+
 if (-not (Test-Path $CONFIG_FILE)) {
     $defaultConfig = @{
         agent = @{
@@ -216,6 +233,13 @@ if (-not (Test-Path $CONFIG_FILE)) {
         }
         workspace = @{ dir = $WORKSPACE_DIR }
         telegram  = @{ botToken = ""; chatId = "" }
+        model     = @{
+            provider            = "openai"
+            apiKey              = $OPENAI_KEY
+            model               = "gpt-4o-mini"
+            baseURL             = "https://api.openai.com/v1"
+            maxCompletionTokens = 1280
+        }
         service   = @{
             name        = $SERVICE_NAME
             displayName = "Kassar Agent"
@@ -226,6 +250,23 @@ if (-not (Test-Path $CONFIG_FILE)) {
     Write-Ok "Config created: $CONFIG_FILE"
 } else {
     Write-Step "Config exists: $CONFIG_FILE"
+    # Update the API key in existing config if provided
+    if ($OPENAI_KEY.Length -gt 0) {
+        $existingCfg = Get-Content $CONFIG_FILE -Raw | ConvertFrom-Json
+        if (-not $existingCfg.model) {
+            $existingCfg | Add-Member -NotePropertyName model -NotePropertyValue ([PSCustomObject]@{
+                provider            = "openai"
+                apiKey              = $OPENAI_KEY
+                model               = "gpt-4o-mini"
+                baseURL             = "https://api.openai.com/v1"
+                maxCompletionTokens = 1280
+            })
+        } else {
+            $existingCfg.model.apiKey = $OPENAI_KEY
+        }
+        $existingCfg | ConvertTo-Json -Depth 5 | Set-Content $CONFIG_FILE -Encoding UTF8
+        Write-Ok "API key saved to config.json"
+    }
 }
 
 # --- Install Windows Service --------------------------------------------------
@@ -276,9 +317,15 @@ Write-Host ""
 Write-Host "  Installed to: $INSTALL_DIR" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Next steps (open a NEW terminal window first):" -ForegroundColor White
-Write-Host "    1. Check version:    kassar --version" -ForegroundColor Cyan
-Write-Host "    2. Open dashboard:   kassar dashboard" -ForegroundColor Cyan
-Write-Host "    3. Start the agent:  kassar service start" -ForegroundColor Cyan
+if ($OPENAI_KEY.Length -eq 0) {
+Write-Host "    1. Set OpenAI key:   kassar openai connect" -ForegroundColor Yellow
+} else {
+Write-Host "    1. OpenAI key: already set" -ForegroundColor Green
+}
+Write-Host "    2. Set Telegram bot: kassar telegram connect" -ForegroundColor Cyan
+Write-Host "    3. Check setup:      kassar doctor" -ForegroundColor Cyan
+Write-Host "    4. Start the agent:  kassar start" -ForegroundColor Cyan
+Write-Host "    5. Open dashboard:   kassar dashboard" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Config file: $CONFIG_FILE" -ForegroundColor DarkGray
 Write-Host "  Docs:        https://kassar-agent.replit.app" -ForegroundColor DarkGray
