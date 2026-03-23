@@ -34,6 +34,13 @@ export interface AgentConfig {
     botToken: string;
     chatId: string;
   };
+  model: {
+    provider: string;
+    apiKey: string;
+    model: string;
+    baseURL: string;
+    maxCompletionTokens: number;
+  };
 }
 
 const DEFAULT_CONFIG: AgentConfig = {
@@ -59,6 +66,13 @@ const DEFAULT_CONFIG: AgentConfig = {
   telegram: {
     botToken: "",
     chatId: "",
+  },
+  model: {
+    provider: "openai",
+    apiKey: "",
+    model: "gpt-4o-mini",
+    baseURL: "https://api.openai.com/v1",
+    maxCompletionTokens: 1280,
   },
 };
 
@@ -104,6 +118,9 @@ function applyEnvOverrides(cfg: AgentConfig): AgentConfig {
   if (process.env["WORKSPACE_DIR"]) cfg.workspace.dir = process.env["WORKSPACE_DIR"];
   if (process.env["BOT_TOKEN"]) cfg.telegram.botToken = process.env["BOT_TOKEN"];
   if (process.env["TELEGRAM_CHAT_ID"]) cfg.telegram.chatId = process.env["TELEGRAM_CHAT_ID"];
+  if (process.env["OPENAI_API_KEY"]) cfg.model.apiKey = process.env["OPENAI_API_KEY"];
+  if (process.env["OPENAI_BASE_URL"]) cfg.model.baseURL = process.env["OPENAI_BASE_URL"];
+  if (process.env["OPENAI_MODEL"])    cfg.model.model   = process.env["OPENAI_MODEL"];
   return cfg;
 }
 
